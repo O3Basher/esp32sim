@@ -464,6 +464,40 @@ fn scripts_use_the_board() {
 }
 
 #[test]
+fn uart_scripts_unescape_special_characters_and_preserve_actual_line_endings() {
+    let mut m = machine();
+    m.load_script(
+        "0.0 uart0 root\n\
+         0.1 uart0 AT\\r\\n\n\
+         0.2 uart0 CMD\\r\n\
+         0.3 uart0 RAW\\n\n\
+         0.4 uart1 ping\\r\\n\n\
+         0.5 uart0 a\\tb\\\\c\\0\\\"\\'\\x41\\r"
+    ).unwrap();
+    let ev = &m.script.events;
+    assert_eq!(ev.len(), 6);
+    assert!(matches!(&ev[0].1, ScriptAction::Uart(0, s) if s == "root\n"));
+    assert!(matches!(&ev[1].1, ScriptAction::Uart(0, s) if s == "AT\r\n"));
+    assert!(matches!(&ev[2].1, ScriptAction::Uart(0, s) if s == "CMD\r"));
+    assert!(matches!(&ev[3].1, ScriptAction::Uart(0, s) if s == "RAW\n"));
+    assert!(matches!(&ev[4].1, ScriptAction::Uart(1, s) if s == "ping\r\n"));
+    assert!(matches!(&ev[5].1, ScriptAction::Uart(0, s) if s == "a\tb\\c\0\"'A\r"));
+
+    // Verify delivery into UART FIFOs: actual carriage return and newline bytes reach the hardware
+    park(&mut m, 0, IRAM, &SPIN);
+    m.load_script("0 uart0 AT\\r\\n\n0 uart1 ping\\r\n0 stop\n").unwrap();
+    m.run(u64::MAX);
+
+    let count0 = (m.bus.read32(0x6000_001c).unwrap() & 0x3ff) as usize;
+    let bytes0: Vec<u8> = (0..count0).map(|_| m.bus.read32(0x6000_0000).unwrap() as u8).collect();
+    assert_eq!(bytes0, b"AT\r\n");
+
+    let count1 = (m.bus.read32(0x6001_001c).unwrap() & 0x3ff) as usize;
+    let bytes1: Vec<u8> = (0..count1).map(|_| m.bus.read32(0x6001_0000).unwrap() as u8).collect();
+    assert_eq!(bytes1, b"ping\r");
+}
+
+#[test]
 fn browser_touch_reaches_the_amoled_controller_and_gpio() {
     let mut m = machine();
     let board = esp32s3::board::WaveshareAmoled18V2::new();

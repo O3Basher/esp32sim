@@ -1128,6 +1128,37 @@ impl<S: Soc> Machine<S> {
         if cw { [(clk, false), (dt, false), (clk, true), (dt, true)] } else { [(dt, false), (clk, false), (dt, true), (clk, true)] }
     }
 
+    /// Unescape string literals (`\r`, `\n`, `\t`, `\\`, `\0`, `\xHH`, ...) for console/UART input.
+    fn unescape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\\' { out.push(c); continue; }
+            match chars.next() {
+                Some('r') => out.push('\r'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('0') => out.push('\0'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('b') => out.push('\x08'),
+                Some('f') => out.push('\x0c'),
+                Some('v') => out.push('\x0b'),
+                Some('a') => out.push('\x07'),
+                Some('e') => out.push('\x1b'),
+                Some('x') => {
+                    let mut hex = String::new();
+                    for _ in 0..2 { if chars.peek().is_some_and(|h| h.is_ascii_hexdigit()) { hex.push(chars.next().unwrap()); } }
+                    if hex.len() == 2 { out.push(u8::from_str_radix(&hex, 16).unwrap() as char); } else { out.push_str("\\x"); out.push_str(&hex); }
+                }
+                Some(other) => { out.push('\\'); out.push(other); }
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
     // ------------------------------------------------------------------ scripts
     /// Parse a script: one action per line, `<seconds> <cmd> [args]`.
     ///   press <pin> [ms]   release <pin>   gpio <pin> <0|1>   serial <text...>   knob <cw|ccw> [detents]   touch <x> <y> <0|1>   poke <addr> <value>   stop
@@ -1171,7 +1202,11 @@ impl<S: Soc> Machine<S> {
                                let text = std::fs::read_to_string(f).map_err(|e| format!("line {}: {}: {}", ln + 1, f, e))?;
                                let samples: Vec<f32> = text.split(|ch: char| ch == ',' || ch.is_whitespace()).filter(|s| !s.is_empty()).map(|s| s.parse::<f32>()).collect::<Result<_, _>>().map_err(|e| format!("line {}: {}: {}", ln + 1, f, e))?;
                                ev.push((c, ScriptAction::Analog(pn, esp_periph::AnalogSource::Wave { samples: std::sync::Arc::new(samples), rate_hz: rate, start_cycles: c }))); }
-                "uart0" | "uart1" => ev.push((c, ScriptAction::Uart(if cmd == "uart0" { 0 } else { 1 }, format!("{}\n", rest)))),
+                "uart0" | "uart1" => {
+                    let text = Self::unescape(rest);
+                    let text = if text.ends_with('\n') || text.ends_with('\r') { text } else { format!("{text}\n") };
+                    ev.push((c, ScriptAction::Uart(if cmd == "uart0" { 0 } else { 1 }, text)));
+                }
                 "knob" => {
                     let mut p = rest.split_whitespace(); let dir = p.next().unwrap_or("cw"); let n: usize = p.next().map(|x| x.parse().unwrap_or(1)).unwrap_or(1);
                     let (clk, dt) = board.encoder().ok_or_else(|| format!("line {}: this board has no encoder", ln + 1))?;
